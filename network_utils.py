@@ -1,136 +1,184 @@
-import requests
+import socket
 import dns.resolver
-import time
+import requests
 import netifaces
 import subprocess
-import json
 import stun
+import speedtest
+import time
+import platform
+from typing import List, Dict, Any, Union
 
-def detect_nat_type():
+def detect_nat_type() -> Dict[str, str]:
     """Detect NAT type using STUN protocol."""
+    print("[DEBUG] Starting NAT detection")
     try:
-        nat = stun.get_ip_info()
-        if nat[1] is None:  # If external IP is None, try alternative STUN server
-            stun.STUN_SERVERS = [('stun.l.google.com', 19302)]
-            nat = stun.get_ip_info()
-        
-        nat_types = {
-            'Blocked': 'Bloqueado',
-            'Open Internet': 'Internet Aberta',
-            'Full Cone': 'NAT Cone Completo',
-            'Restricted NAT': 'NAT Restrito',
-            'Port Restricted NAT': 'NAT com Porta Restrita',
-            'Symmetric NAT': 'NAT Simétrico'
-        }
-        
+        nat_type, external_ip, external_port = stun.get_ip_info(
+            source_ip="0.0.0.0",
+            source_port=54320,
+            stun_host="stun.l.google.com",
+            stun_port=19302
+        )
+        print(f"[DEBUG] NAT detection successful: {nat_type}")
         return {
-            'Tipo de NAT': nat_types.get(nat[0], nat[0]),
-            'IP Externo': nat[1] or 'Não detectado',
-            'Porta Externa': nat[2] or 'Não detectada'
+            'NAT Type': nat_type,
+            'External IP': external_ip if external_ip else "Não detectado",
+            'External Port': str(external_port) if external_port else "Não detectado"
         }
     except Exception as e:
+        print(f"[DEBUG] Error in NAT detection: {str(e)}")
         return {
-            'Tipo de NAT': 'Não detectado',
-            'IP Externo': 'Não detectado',
-            'Porta Externa': 'Não detectada',
-            'Erro': str(e)
+            'NAT Type': 'Erro ao detectar NAT',
+            'Error': str(e)
         }
 
-def get_dns_servers():
+def get_dns_servers() -> List[str]:
     """Get list of DNS servers."""
-    resolver = dns.resolver.Resolver()
-    return resolver.nameservers
+    print("[DEBUG] Getting DNS servers")
+    try:
+        resolver = dns.resolver.Resolver()
+        dns_servers = resolver.nameservers
+        print(f"[DEBUG] Found DNS servers: {dns_servers}")
+        return dns_servers
+    except Exception as e:
+        print(f"[DEBUG] Error getting DNS servers: {str(e)}")
+        return ['8.8.8.8', '8.8.4.4']  # Google DNS as fallback
 
-def test_dns_servers(servers):
+def test_dns_servers(servers: List[str]) -> Dict[str, Dict[str, Union[str, float]]]:
     """Test DNS servers response time."""
-    results = []
+    print("[DEBUG] Testing DNS servers")
+    results = {}
     for server in servers:
-        resolver = dns.resolver.Resolver(configure=False)
-        resolver.nameservers = [server]
         try:
-            start = time.time()
-            answer = resolver.resolve('www.google.com', 'A')
-            end = time.time()
-            latency = (end - start) * 1000  # Convert to milliseconds
-            results.append({'Servidor DNS': server, 'Latência (ms)': round(latency, 2), 'Status': 'Respondendo'})
+            print(f"[DEBUG] Testing DNS server: {server}")
+            resolver = dns.resolver.Resolver()
+            resolver.nameservers = [server]
+            resolver.timeout = 2
+            resolver.lifetime = 2
+            
+            start_time = time.time()
+            resolver.resolve('google.com', 'A')
+            response_time = (time.time() - start_time) * 1000
+            
+            results[server] = {
+                'Status': 'Online',
+                'Response Time': f"{response_time:.2f}ms"
+            }
+            print(f"[DEBUG] DNS server {server} test successful")
         except Exception as e:
-            results.append({'Servidor DNS': server, 'Latência (ms)': None, 'Status': 'Sem resposta'})
+            print(f"[DEBUG] Error testing DNS server {server}: {str(e)}")
+            results[server] = {
+                'Status': 'Offline',
+                'Error': str(e)
+            }
     return results
 
-def get_isp_info():
-    """Get ISP information using ipinfo.io."""
+def get_isp_info() -> Dict[str, str]:
+    """Get ISP information using ipapi.co."""
+    print("[DEBUG] Getting ISP information")
     try:
-        response = requests.get('https://ipinfo.io/json')
+        response = requests.get('https://ipapi.co/json/', timeout=5)
         data = response.json()
+        print("[DEBUG] ISP information retrieved successfully")
         return {
-            'ISP': data.get('org', 'N/A'),
-            'Localização': f"{data.get('city', '')}, {data.get('region', '')}, {data.get('country', '')}",
-            'ASN': data.get('asn', 'N/A'),
-            'IP': data.get('ip', 'N/A')
+            'ISP': data.get('org', 'Não detectado'),
+            'IP': data.get('ip', 'Não detectado'),
+            'City': data.get('city', 'Não detectada'),
+            'Region': data.get('region', 'Não detectada'),
+            'Country': data.get('country_name', 'Não detectado')
         }
     except Exception as e:
-        return {'Erro': str(e)}
+        print(f"[DEBUG] Error getting ISP information: {str(e)}")
+        return {
+            'Error': f"Falha ao obter informações do ISP: {str(e)}"
+        }
 
-def get_public_ip():
-    """Get public IP address."""
+def get_internal_network_info() -> Dict[str, Any]:
+    """Get internal network interface information."""
+    print("[DEBUG] Getting internal network information")
+    network_info = {}
     try:
-        response = requests.get('https://api.ipify.org?format=json')
-        ip = response.json().get('ip', 'N/A')
-        return ip
+        interfaces = netifaces.interfaces()
+        for interface in interfaces:
+            try:
+                print(f"[DEBUG] Analyzing interface: {interface}")
+                addrs = netifaces.ifaddresses(interface)
+                if netifaces.AF_INET in addrs:
+                    network_info[interface] = {
+                        'IPv4': addrs[netifaces.AF_INET][0].get('addr', 'Não detectado'),
+                        'Netmask': addrs[netifaces.AF_INET][0].get('netmask', 'Não detectada')
+                    }
+                    if 'broadcast' in addrs[netifaces.AF_INET][0]:
+                        network_info[interface]['Broadcast'] = addrs[netifaces.AF_INET][0]['broadcast']
+                print(f"[DEBUG] Interface {interface} analyzed successfully")
+            except Exception as e:
+                print(f"[DEBUG] Error analyzing interface {interface}: {str(e)}")
+                network_info[interface] = {'Error': str(e)}
     except Exception as e:
-        return f'Erro: {e}'
-
-def get_internal_network_info():
-    """Get internal network properties."""
-    interfaces = netifaces.interfaces()
-    network_info = []
-    for iface in interfaces:
-        addr = netifaces.ifaddresses(iface)
-        ip_info = addr.get(netifaces.AF_INET, [{}])[0]
-        mac_info = addr.get(netifaces.AF_LINK, [{}])[0]
-        gateway_info = netifaces.gateways().get('default', {})
-        gateway = gateway_info.get(netifaces.AF_INET, [None])[0]
-        network_info.append({
-            'Interface': iface,
-            'Endereço IP': ip_info.get('addr', 'N/A'),
-            'Máscara de Sub-rede': ip_info.get('netmask', 'N/A'),
-            'Gateway Padrão': gateway if gateway else 'N/A',
-            'Endereço MAC': mac_info.get('addr', 'N/A')
-        })
+        print(f"[DEBUG] Error getting network interfaces: {str(e)}")
+        return {'Error': str(e)}
     return network_info
 
-def ping_test(hosts):
-    """Test connectivity to external hosts."""
-    results = []
+def ping_test(hosts: List[str]) -> Dict[str, Dict[str, Union[str, float]]]:
+    """Test connectivity to multiple hosts."""
+    print("[DEBUG] Starting ping tests")
+    results = {}
+    ping_param = '-n' if platform.system().lower() == 'windows' else '-c'
+    
     for host in hosts:
         try:
-            param = '-n' if subprocess.call('ping -n 1 localhost', shell=True, stdout=subprocess.DEVNULL) == 0 else '-c'
-            command = ['ping', param, '4', host]
-            output = subprocess.check_output(command, universal_newlines=True)
-            latency_line = [line for line in output.split('\n') if 'tempo médio' in line or 'avg' in line]
-            if latency_line:
-                latency = ''.join(filter(str.isdigit, latency_line[0]))
-                results.append({'Host': host, 'Latência Média (ms)': latency, 'Status': 'Alcançável'})
+            print(f"[DEBUG] Pinging host: {host}")
+            cmd = ['ping', ping_param, '1', host]
+            start_time = time.time()
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            response_time = (time.time() - start_time) * 1000
+            
+            if result.returncode == 0:
+                results[host] = {
+                    'Status': 'Online',
+                    'Response Time': f"{response_time:.2f}ms"
+                }
+                print(f"[DEBUG] Ping to {host} successful")
             else:
-                results.append({'Host': host, 'Latência Média (ms)': None, 'Status': 'Alcançável, mas sem dados de latência'})
-        except subprocess.CalledProcessError:
-            results.append({'Host': host, 'Latência Média (ms)': None, 'Status': 'Inalcançável'})
+                results[host] = {
+                    'Status': 'Offline',
+                    'Error': 'Host não alcançável'
+                }
+                print(f"[DEBUG] Ping to {host} failed")
+        except Exception as e:
+            print(f"[DEBUG] Error pinging {host}: {str(e)}")
+            results[host] = {
+                'Status': 'Erro',
+                'Error': str(e)
+            }
     return results
 
-def network_performance_test():
-    """Test network performance using speedtest-cli."""
+def network_performance_test() -> Dict[str, Union[str, float]]:
+    """Test network download and upload speeds."""
+    print("[DEBUG] Starting network performance test")
     try:
-        result = subprocess.run(['speedtest-cli', '--json'], capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            return {
-                'Status': 'Sucesso',
-                'Velocidade de Download (Mbps)': round(data['download'] / 10**6, 2),
-                'Velocidade de Upload (Mbps)': round(data['upload'] / 10**6, 2),
-                'Ping (ms)': round(data['ping'], 2),
-                'ISP do Servidor': data['server']['sponsor']
-            }
-    except subprocess.TimeoutExpired:
-        return {'Status': 'Erro: Timeout durante o teste de velocidade'}
+        st = speedtest.Speedtest()
+        print("[DEBUG] Getting best server")
+        st.get_best_server()
+        
+        print("[DEBUG] Testing download speed")
+        download_speed = st.download() / 1_000_000  # Convert to Mbps
+        print(f"[DEBUG] Download speed: {download_speed:.2f} Mbps")
+        
+        print("[DEBUG] Testing upload speed")
+        upload_speed = st.upload() / 1_000_000  # Convert to Mbps
+        print(f"[DEBUG] Upload speed: {upload_speed:.2f} Mbps")
+        
+        print("[DEBUG] Getting ping")
+        ping = st.results.ping
+        
+        return {
+            'Download': f"{download_speed:.2f} Mbps",
+            'Upload': f"{upload_speed:.2f} Mbps",
+            'Ping': f"{ping:.2f} ms"
+        }
     except Exception as e:
-        return {'Status': f'Erro: {str(e)}'}
+        print(f"[DEBUG] Error in network performance test: {str(e)}")
+        return {
+            'Error': f"Falha ao realizar teste de velocidade: {str(e)}"
+        }
